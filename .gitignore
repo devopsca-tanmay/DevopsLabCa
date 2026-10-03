@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Environment / secrets  -- NEVER commit these
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.ppk
+aws-credentials
+.aws/
+docker-credentials.json
+
+# Build output
+dist/
+build/
+frontend/dist/
+coverage/
+*.tsbuildinfo
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Docker local volumes
+pgdata/

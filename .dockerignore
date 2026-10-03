@@ -1,0 +1,16 @@
+**/node_modules
+**/dist
+**/build
+**/coverage
+**/.git
+**/.github
+**/.env
+**/.env.*
+!**/.env.example
+**/*.log
+**/.DS_Store
+**/*.md
+!README.md
+docs/
+scripts/
+**/*.pem
