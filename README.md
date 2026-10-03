@@ -134,7 +134,7 @@ to the world.
                                             Trivy image scan
                                                     |
                                                     v
-                                          Push to Docker Hub
+                                          Push to Amazon ECR
                                        tags: <commit-sha> + latest
                                                     |
                                                     v
@@ -171,7 +171,7 @@ A full-page diagram is in [`docs/architecture.md`](docs/architecture.md).
 | Testing | Jest 29, Supertest 7 |
 | Containers | Docker (multi-stage), Docker Compose v2 |
 | CI/CD | GitHub Actions |
-| Registry | Docker Hub (Amazon ECR notes in `docs/deployment.md`) |
+| Registry | Amazon ECR (pushed through GitHub OIDC, no stored AWS keys) |
 | Scanning | Trivy |
 | Hosting | AWS EC2 (Ubuntu) |
 | Proxy | Nginx |
@@ -542,8 +542,7 @@ Settings → Secrets and variables → Actions → *New repository secret*.
 
 | Secret | Example | Used for |
 |---|---|---|
-| `DOCKERHUB_USERNAME` | `yourname` | Registry login; also the image namespace |
-| `DOCKERHUB_TOKEN` | *(access token)* | Registry login — use a token, not your password |
+| `AWS_ROLE_ARN` | `arn:aws:iam::<account>:role/fintrack-github-actions` | Assumed through OIDC to push to ECR |
 | `EC2_HOST` | `13.234.x.x` | Deployment target |
 | `EC2_USER` | `ubuntu` | SSH user |
 | `EC2_SSH_KEY` | *(full private key)* | SSH authentication — the entire PEM, including header and footer lines |
@@ -552,9 +551,10 @@ Settings → Secrets and variables → Actions → *New repository secret*.
 | `POSTGRES_DB` | `fintrack` | Database name |
 | `JWT_SECRET` | `openssl rand -hex 32` | Token signing |
 
-For Amazon ECR instead of Docker Hub you would use `AWS_ACCESS_KEY_ID`,
-`AWS_SECRET_ACCESS_KEY`, `AWS_REGION` and `ECR_REGISTRY`; the substitution is
-documented in [`docs/deployment.md`](docs/deployment.md).
+Plus one repository **variable**, `APP_HOST` (the Elastic IP), used for the
+link on the *production* environment. All of the AWS side — ECR, IAM roles,
+security group, instance, Elastic IP — is created by
+`scripts/aws-provision.sh`; see [`docs/deployment.md`](docs/deployment.md).
 
 **No secret value appears anywhere in this repository.** They exist only in
 GitHub Secrets and, at runtime, in `/opt/fintrack/.env` on the instance
@@ -707,7 +707,7 @@ Open a pull request into `main`, show CI running on the PR, merge it.
 
 **3. Watch the pipeline** in the Actions tab: lint, unit tests, integration
 tests and the frontend build run in parallel → Docker build → Trivy scan →
-push to Docker Hub → CD pulls on EC2 → migrations → containers replaced →
+push to Amazon ECR → CD pulls on EC2 → migrations → containers replaced →
 health check passes.
 
 **4. Refresh the live site.** The new heading is there.
@@ -746,7 +746,7 @@ Capture these into `docs/screenshots/` for the report:
 | 7 | `docker images` | Terminal |
 | 8 | `docker compose ps` showing all healthy | Terminal |
 | 9 | `docker compose up -d` output | Terminal |
-| 10 | Image tags (`latest` + SHA) | Docker Hub |
+| 10 | Image tags (`latest` + SHA) | AWS Console → ECR |
 | 11 | EC2 instance, running | AWS Console |
 | 12 | Security group inbound rules | AWS Console |
 | 13 | Deployment logs | Actions → CD job |
