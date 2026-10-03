@@ -41,6 +41,9 @@ on:
         required: true
         default: 'latest'
 
+env:
+  AWS_REGION: ap-south-1
+
 concurrency:
   # Never let two deployments touch the instance at the same time, and do NOT
   # cancel one in progress - a half-applied deployment is worse than a slow one.
@@ -57,6 +60,11 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
 
+    permissions:
+      contents: read
+      # Needed to exchange the workflow's OIDC token for AWS credentials.
+      id-token: write
+
     environment:
       name: production
       url: http://${{ secrets.EC2_HOST }}
@@ -69,6 +77,19 @@ jobs:
           # For a workflow_run trigger, check out the exact commit CI tested -
           # not whatever happens to be at the branch head now.
           ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+
+      # The runner never pulls images itself; it only needs the registry
+      # address to hand to the instance. Logging in here also proves the role
+      # and the repositories exist before anything on the server is touched.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Resolve the image tag to deploy
         id: resolve
@@ -136,9 +157,8 @@ jobs:
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
             "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
             "TAG='${TAG}' \
-             REGISTRY='${{ secrets.DOCKERHUB_USERNAME }}' \
-             DOCKERHUB_USERNAME='${{ secrets.DOCKERHUB_USERNAME }}' \
-             DOCKERHUB_TOKEN='${{ secrets.DOCKERHUB_TOKEN }}' \
+             REGISTRY='${{ steps.ecr.outputs.registry }}' \
+             AWS_REGION='${{ env.AWS_REGION }}' \
              POSTGRES_USER='${{ secrets.POSTGRES_USER }}' \
              POSTGRES_PASSWORD='${{ secrets.POSTGRES_PASSWORD }}' \
              POSTGRES_DB='${{ secrets.POSTGRES_DB }}' \
@@ -166,7 +186,10 @@ jobs:
           ENVFILE
 
           # ---- Registry login ----------------------------------------------
-          echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
+          # The instance authenticates with its own IAM instance profile
+          # (read-only ECR access), so no AWS keys are ever sent to it.
+          aws ecr get-login-password --region "${AWS_REGION}" \
+            | docker login --username AWS --password-stdin "${REGISTRY}"
 
           # ---- Pull the pre-built, CI-tested images -------------------------
           # Nothing is compiled here. The artifact deployed is byte-for-byte
