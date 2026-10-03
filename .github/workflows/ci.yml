@@ -284,7 +284,7 @@ jobs:
       # contents rather than on this repository's code. A production team would
       # set exit-code: '1' here and maintain a reviewed .trivyignore.
       - name: Scan backend image with Trivy
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         # Continue even if the vulnerability database is unreachable, so an
         # outage at the scanner's CDN cannot break an unrelated deployment.
         continue-on-error: true
@@ -296,7 +296,7 @@ jobs:
           exit-code: '0'
 
       - name: Scan frontend image with Trivy
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         continue-on-error: true
         with:
           image-ref: fintrack-frontend:${{ steps.meta.outputs.sha-tag }}
@@ -306,7 +306,7 @@ jobs:
           exit-code: '0'
 
       - name: Produce SARIF report for the Security tab
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         continue-on-error: true
         with:
           image-ref: fintrack-backend:${{ steps.meta.outputs.sha-tag }}
