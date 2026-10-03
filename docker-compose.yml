@@ -1,0 +1,140 @@
+# =============================================================================
+# FinTrack - LOCAL DEVELOPMENT stack
+# -----------------------------------------------------------------------------
+# Brings up the whole application on a developer machine with one command:
+#
+#     cp .env.example .env     # once
+#     docker compose up -d
+#     open http://localhost
+#
+# This file BUILDS the images from source, which is what you want locally.
+# Production does the opposite: docker-compose.prod.yml PULLS pre-built,
+# CI-tested images from the registry and never compiles anything on the server.
+#
+# Only nginx publishes a port. frontend, backend and postgres talk to each
+# other over the private `fintrack-net` bridge network by service name.
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: fintrack-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fintrack}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fintrack}
+      POSTGRES_DB: ${POSTGRES_DB:-fintrack}
+    volumes:
+      # Named volume: the database survives `docker compose down` and any
+      # container rebuild. Only `docker compose down -v` destroys it.
+      - pgdata:/var/lib/postgresql/data
+      # Postgres runs every .sql here exactly once, on an EMPTY data directory.
+      # It will not re-run on later boots - that is what migrations are for.
+      - ./database/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    ports:
+      # Bound to 127.0.0.1 so the database is reachable from a local psql or
+      # GUI client but never from the network. Production publishes nothing.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      # pg_isready is the readiness signal the backend waits on, so it never
+      # starts against a database that is still initialising.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fintrack} -d ${POSTGRES_DB:-fintrack}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - fintrack-net
+
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      # Context is the repo root: the backend image needs database/migrations
+      # as well as backend/, and COPY cannot reach outside its context.
+      context: .
+      dockerfile: backend/Dockerfile
+      target: final
+    image: fintrack-backend:local
+    container_name: fintrack-backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 5000
+      # Host is the SERVICE NAME, not localhost: inside a container, localhost
+      # is that container itself.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fintrack}:${POSTGRES_PASSWORD:-fintrack}@postgres:5432/${POSTGRES_DB:-fintrack}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set - copy .env.example to .env}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-24h}
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-10}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      APP_VERSION: ${IMAGE_TAG:-local}
+    depends_on:
+      postgres:
+        # Waits for the HEALTHCHECK to pass, not merely for the container to
+        # exist - otherwise the backend races postgres during its first boot.
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:5000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - fintrack-net
+    # No `ports:` - the backend is reachable only through nginx.
+
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      target: serve
+      args:
+        # Relative path: the browser calls /api on the same origin and nginx
+        # routes it to the backend. No hostname is baked into the bundle.
+        VITE_API_URL: /api
+    image: fintrack-frontend:local
+    container_name: fintrack-frontend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - fintrack-net
+
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: fintrack-nginx
+    restart: unless-stopped
+    ports:
+      # The single public entry point for the whole stack.
+      - "${HTTP_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost/nginx-health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - fintrack-net
+
+networks:
+  fintrack-net:
+    driver: bridge
+    name: fintrack-net
+
+volumes:
+  pgdata:
+    name: fintrack-pgdata
