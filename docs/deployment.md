@@ -177,12 +177,11 @@ repository secret**.
 | Secret | Value | How to produce it |
 |---|---|---|
 | `AWS_ROLE_ARN` | `arn:aws:iam::<account>:role/fintrack-github-actions` | Printed by `aws-provision.sh` |
-| `EC2_HOST` | `13.234.x.x` | EC2 console → public IPv4 |
 | `EC2_USER` | `ubuntu` | Default for Ubuntu AMIs |
 | `EC2_SSH_KEY` | The **entire** `.pem` contents | `cat fintrack-key.pem` — include the `-----BEGIN/END-----` lines |
-| `POSTGRES_USER` | `fintrack` | Your choice |
+| `POSTGRES_USER` | `fintrack_app` | Anything except a word that appears in logs (see below) |
 | `POSTGRES_PASSWORD` | A strong password | `openssl rand -base64 24` |
-| `POSTGRES_DB` | `fintrack` | Your choice |
+| `POSTGRES_DB` | `fintrack_prod` | Same rule |
 | `JWT_SECRET` | A 64-char hex string | `openssl rand -hex 32` |
 
 ```bash
@@ -192,8 +191,14 @@ openssl rand -base64 24     # POSTGRES_PASSWORD
 ```
 
 Also add one **repository variable** (Variables tab, not Secrets):
-`APP_HOST` = the Elastic IP. GitHub does not allow secrets in a job's
-`environment.url`, so the link on the *production* environment uses this.
+`EC2_HOST` = the Elastic IP. The address is public anyway, and as a secret it
+would be masked as `***` in every log line; GitHub also does not allow secrets
+in a job's `environment.url`.
+
+> GitHub replaces every occurrence of a secret's value with `***` in the logs.
+> A database user called `fintrack` therefore turns `fintrack-backend` into
+> `***-backend` throughout the CD output. Use values that do not occur as
+> ordinary words, such as `fintrack_app` and `fintrack_prod`.
 
 > `EC2_SSH_KEY` must be the complete private key including both delimiter
 > lines. A truncated key is the single most common cause of
@@ -506,7 +511,7 @@ Everything except the database is reproducible from the repository and the
 registry:
 
 1. Launch a replacement instance (Steps 1–3)
-2. Update the `EC2_HOST` secret
+2. Update the `EC2_HOST` variable
 3. Re-run the CD workflow — images are pulled, the stack comes up
 4. Restore the most recent `pg_dump`
 
@@ -634,17 +639,16 @@ Every secret the pipeline needs, where it is used, and how to generate it.
 | Secret | Used in | Purpose | Source |
 |---|---|---|---|
 | `AWS_ROLE_ARN` | `ci.yml`, `cd.yml` | Role assumed through OIDC for ECR | `aws-provision.sh` output |
-| `EC2_HOST` | `cd.yml` | Deployment target | EC2 console → public IPv4 |
 | `EC2_USER` | `cd.yml` | SSH user | `ubuntu` |
 | `EC2_SSH_KEY` | `cd.yml` | SSH authentication | The full `.pem` file contents |
 | `POSTGRES_USER` | `cd.yml` → `.env` | Database user | Your choice |
 | `POSTGRES_PASSWORD` | `cd.yml` → `.env` | Database password | `openssl rand -base64 24` |
-| `POSTGRES_DB` | `cd.yml` → `.env` | Database name | `fintrack` |
+| `POSTGRES_DB` | `cd.yml` → `.env` | Database name | `fintrack_prod` |
 | `JWT_SECRET` | `cd.yml` → `.env` | Token signing | `openssl rand -hex 32` |
 
 | Variable | Used in | Purpose |
 |---|---|---|
-| `APP_HOST` | `cd.yml` | Public address shown on the *production* environment |
+| `EC2_HOST` | `cd.yml` | Deployment target and the *production* environment link |
 
 There are **no AWS access keys** in this list: CI/CD authenticates through
 OIDC and the instance through its instance profile.

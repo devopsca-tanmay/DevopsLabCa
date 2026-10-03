@@ -562,12 +562,11 @@ commit, in any history.
 | Secret | Purpose | How to obtain |
 |---|---|---|
 | `AWS_ROLE_ARN` | IAM role assumed via OIDC to push to / resolve ECR | Output of `scripts/aws-provision.sh` |
-| `EC2_HOST` | Deployment target | EC2 console → public IPv4 |
 | `EC2_USER` | SSH user | `ubuntu` on Ubuntu AMIs |
 | `EC2_SSH_KEY` | SSH authentication | The **entire** `.pem`, including `-----BEGIN/END-----` lines |
 | `POSTGRES_USER` | Database | Your choice |
 | `POSTGRES_PASSWORD` | Database | `openssl rand -base64 24` |
-| `POSTGRES_DB` | Database | `fintrack` |
+| `POSTGRES_DB` | Database | `fintrack_prod` |
 | `JWT_SECRET` | Token signing | `openssl rand -hex 32` |
 
 For ECR, add `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`,
