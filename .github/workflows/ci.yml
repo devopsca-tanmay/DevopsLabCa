@@ -16,8 +16,10 @@
 # whole chain. `needs:` then makes the image build wait for ALL of them, so a
 # single failure stops the pipeline before anything is published.
 #
-# Images are pushed only on a push to main/develop - never on a pull request
-# from a fork, which must not have registry credentials.
+# Images are pushed to Amazon ECR only on a push to main/develop - never on a
+# pull request from a fork, which must not be able to assume the AWS role.
+# Authentication uses GitHub's OIDC token, so no long-lived AWS access keys
+# are stored anywhere in the repository or its secrets.
 # =============================================================================
 
 name: CI
@@ -38,6 +40,7 @@ concurrency:
 
 env:
   NODE_VERSION: '20'
+  AWS_REGION: ap-south-1
 
 jobs:
   # ===========================================================================
@@ -46,10 +49,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           # Caches ~/.npm keyed on the lockfiles, cutting install time on
@@ -81,10 +84,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -128,10 +131,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -163,7 +166,7 @@ jobs:
         run: npm run test:coverage
 
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         # `always()` so coverage is still available when a test failed - that
         # is precisely when it is most useful for diagnosis.
         if: always()
@@ -178,10 +181,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -200,7 +203,7 @@ jobs:
         run: npm run build
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: frontend-dist
           path: frontend/dist/
@@ -218,13 +221,16 @@ jobs:
       contents: read
       # Lets the Trivy SARIF report appear in the repository's Security tab.
       security-events: write
+      # Lets the job request a short-lived OIDC token, which AWS exchanges for
+      # temporary credentials of the ECR push role.
+      id-token: write
 
     outputs:
       image-tag: ${{ steps.meta.outputs.sha-tag }}
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -284,7 +290,7 @@ jobs:
       # contents rather than on this repository's code. A production team would
       # set exit-code: '1' here and maintain a reviewed .trivyignore.
       - name: Scan backend image with Trivy
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         # Continue even if the vulnerability database is unreachable, so an
         # outage at the scanner's CDN cannot break an unrelated deployment.
         continue-on-error: true
@@ -296,7 +302,7 @@ jobs:
           exit-code: '0'
 
       - name: Scan frontend image with Trivy
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         continue-on-error: true
         with:
           image-ref: fintrack-frontend:${{ steps.meta.outputs.sha-tag }}
@@ -306,7 +312,7 @@ jobs:
           exit-code: '0'
 
       - name: Produce SARIF report for the Security tab
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         continue-on-error: true
         with:
           image-ref: fintrack-backend:${{ steps.meta.outputs.sha-tag }}
@@ -327,12 +333,18 @@ jobs:
       # Only on a direct push to main or develop. Pull requests - including
       # those from forks - never reach this step, so registry credentials are
       # never exposed to untrusted code.
-      - name: Log in to Docker Hub
+      - name: Configure AWS credentials
         if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
-        uses: docker/login-action@v3
+        uses: aws-actions/configure-aws-credentials@v5
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          # IAM role trusted only for this repository's main/develop pushes.
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Push backend image
         if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
@@ -342,11 +354,14 @@ jobs:
           file: backend/Dockerfile
           target: final
           push: true
+          # ECR does not need the provenance attestation manifest, and leaving
+          # it out keeps the repository listing to one entry per tag.
+          provenance: false
           # Both tags point at the same image: the SHA tag is the immutable
           # record used for rollback, `latest` is the convenience pointer.
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/fintrack-backend:${{ steps.meta.outputs.sha-tag }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/fintrack-backend:latest
+            ${{ steps.ecr.outputs.registry }}/fintrack-backend:${{ steps.meta.outputs.sha-tag }}
+            ${{ steps.ecr.outputs.registry }}/fintrack-backend:latest
           cache-from: type=gha
 
       - name: Push frontend image
@@ -357,11 +372,12 @@ jobs:
           file: frontend/Dockerfile
           target: serve
           push: true
+          provenance: false
           build-args: |
             VITE_API_URL=/api
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/fintrack-frontend:${{ steps.meta.outputs.sha-tag }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/fintrack-frontend:latest
+            ${{ steps.ecr.outputs.registry }}/fintrack-frontend:${{ steps.meta.outputs.sha-tag }}
+            ${{ steps.ecr.outputs.registry }}/fintrack-frontend:latest
           cache-from: type=gha
 
       - name: Summarise the run

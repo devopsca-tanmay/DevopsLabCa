@@ -65,7 +65,7 @@
                                       |
                                       v
                               Docker Registry
-                               (Docker Hub)
+                               (Amazon ECR)
                                       |
                         tags: :latest  +  :<commit-sha>
                                       |
