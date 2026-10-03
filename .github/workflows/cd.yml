@@ -67,7 +67,9 @@ jobs:
 
     environment:
       name: production
-      url: http://${{ secrets.EC2_HOST }}
+      # The secrets context is not available here, so the public address is
+      # also stored as the repository variable APP_HOST.
+      url: http://${{ vars.APP_HOST }}
 
     steps:
       # -----------------------------------------------------------------------
