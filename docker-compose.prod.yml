@@ -1,0 +1,141 @@
+# =============================================================================
+# FinTrack - PRODUCTION stack (runs on the EC2 instance)
+# -----------------------------------------------------------------------------
+# The difference that matters:
+#
+#   docker-compose.yml       BUILDS images from source      (developer laptop)
+#   docker-compose.prod.yml  PULLS pre-built images         (EC2)
+#
+# There is no `build:` key anywhere in this file, and that is deliberate. The
+# artifact deployed to production is the exact image CI built, tested and
+# scanned - identified by commit SHA. Building on the server would produce a
+# DIFFERENT artifact from the one the tests passed against, and would make the
+# deployment depend on npm registry availability at deploy time.
+#
+#     Build in CI  ->  Store in registry  ->  Deploy that artifact
+#
+# Used by .github/workflows/cd.yml as:
+#     docker compose -f docker-compose.prod.yml pull
+#     docker compose -f docker-compose.prod.yml up -d
+#
+# Required variables come from /opt/fintrack/.env on the instance, written by
+# the CD pipeline from GitHub Secrets. See docs/deployment.md.
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: fintrack-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+    volumes:
+      # The only stateful thing on the instance. Containers are replaced on
+      # every deploy; this volume is not, so data survives deploys and
+      # rollbacks alike.
+      - pgdata:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    # NO `ports:` - postgres is never published to the host, so it is not
+    # reachable from the internet regardless of the security group. It is
+    # addressable only as `postgres:5432` on the internal network.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - fintrack-net
+    logging: &json-logging
+      # Cap log size so a chatty container cannot fill the instance's disk and
+      # take the whole stack down. 3 x 10MB per container.
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  backend:
+    # Pulled, never built. IMAGE_TAG is the commit SHA of the deployed build -
+    # which is exactly what makes rollback a one-line change:
+    #   IMAGE_TAG=<previous-sha> docker compose -f docker-compose.prod.yml up -d
+    image: ${REGISTRY}/fintrack-backend:${IMAGE_TAG:-latest}
+    container_name: fintrack-backend
+    restart: always
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-24h}
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-10}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Surfaced by GET /health, so the deployed version is verifiable from
+      # outside the box - useful when confirming a rollback actually took.
+      APP_VERSION: ${IMAGE_TAG:-unknown}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:5000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - fintrack-net
+    logging: *json-logging
+
+  # ---------------------------------------------------------------------------
+  frontend:
+    image: ${REGISTRY}/fintrack-frontend:${IMAGE_TAG:-latest}
+    container_name: fintrack-frontend
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - fintrack-net
+    logging: *json-logging
+
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: fintrack-nginx
+    restart: always
+    ports:
+      - "80:80"
+      # Uncomment once TLS is configured (see nginx/nginx.conf).
+      # - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # - /etc/letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost/nginx-health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - fintrack-net
+    logging: *json-logging
+
+networks:
+  fintrack-net:
+    driver: bridge
+    name: fintrack-net
+
+volumes:
+  pgdata:
+    name: fintrack-pgdata
