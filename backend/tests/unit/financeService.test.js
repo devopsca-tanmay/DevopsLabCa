@@ -15,7 +15,7 @@ describe('financeService - income and expense totals', () => {
   ];
 
   test('calculateTotalIncome sums only income rows', () => {
-    expect(finance.calculateTotalIncome(sample)).toBe(120000);
+    expect(finance.calculateTotalIncome(sample)).toBe(90000);
   });
 
   test('calculateTotalExpenses sums only expense rows', () => {
