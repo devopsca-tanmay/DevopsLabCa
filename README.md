@@ -531,7 +531,7 @@ ssh -i key.pem ubuntu@<EC2-IP> 'bash ~/ec2-setup.sh'
 
 | Port | Source | Why |
 |---|---|---|
-| 22 | **your IP only** | SSH for administration and the CD pipeline |
+| 22 | `0.0.0.0/0`, **key-only** | SSH for the CD pipeline. GitHub-hosted runners have no fixed IP range; Ubuntu AMIs disable password login, so only the deploy key works |
 | 80 | `0.0.0.0/0` | Public HTTP |
 | 443 | `0.0.0.0/0` | Once TLS is configured |
 | 5432 | **never** | PostgreSQL is not published — it is reachable only on the internal Docker network |
