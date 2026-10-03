@@ -766,6 +766,8 @@ Capture these into `docs/screenshots/` for the report:
 | Port 80 already in use | Another local web server | Set `HTTP_PORT=8080` in `.env`, then browse to `http://localhost:8080` |
 | Browser shows the old version after a deploy | Cached `index.html` | Hard refresh. `frontend/nginx.conf` already sends `no-store` for `index.html` and immutable caching only for fingerprinted assets |
 | `npm test` fails with `ECONNREFUSED` | No database for the integration suite | `docker compose up -d postgres` and export `DATABASE_URL` |
+| `docker compose build` fails with `rpc error: code = Unavailable desc = error reading from server: EOF` | The BuildKit worker was killed — almost always the host running out of memory, not a problem with the Dockerfile | Give Docker Desktop more memory (Settings → Resources → Memory, 4 GB+), close other heavy applications, then build one service at a time: `docker compose build backend` then `docker compose build frontend` |
+| Frontend build hangs or dies during `vite build` | Same cause as above — the Vite/Rollup build is the most memory-hungry step | Build it on its own: `docker compose build frontend`. CI runners have ample memory and are unaffected |
 | Jest crashes with `Zone Allocation failed - process out of memory` | Host RAM exhausted, not a test defect | Run the suites separately (`npm run test:unit`, then `npm run test:integration`) or add `node --max-old-space-size=512`. CI runners are unaffected |
 | CD fails at `Permission denied (publickey)` | `EC2_SSH_KEY` is incomplete | Paste the **entire** private key, including the `-----BEGIN/END-----` lines |
 | CD fails at `docker: permission denied` | Deploy user not in the `docker` group | Re-run `scripts/ec2-setup.sh`, then log out and back in |
