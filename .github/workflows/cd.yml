@@ -141,11 +141,14 @@ jobs:
         run: |
           set -euo pipefail
           # Only the files the server genuinely needs: the compose file, the
-          # nginx config and the SQL. NOT the application source - the
-          # application arrives as a pre-built image from the registry.
+          # nginx config, the SQL and the manual rollback script. NOT the
+          # application source - the application arrives as a pre-built image
+          # from the registry.
           scp -i ~/.ssh/deploy_key -o BatchMode=yes \
-            docker-compose.prod.yml \
-            "${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}:/opt/fintrack/docker-compose.prod.yml"
+            docker-compose.prod.yml scripts/rollback.sh \
+            "${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}:/opt/fintrack/"
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+            "${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}" 'chmod +x /opt/fintrack/rollback.sh'
 
           scp -i ~/.ssh/deploy_key -o BatchMode=yes -r \
             nginx database \
