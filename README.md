@@ -543,16 +543,15 @@ Settings → Secrets and variables → Actions → *New repository secret*.
 | Secret | Example | Used for |
 |---|---|---|
 | `AWS_ROLE_ARN` | `arn:aws:iam::<account>:role/fintrack-github-actions` | Assumed through OIDC to push to ECR |
-| `EC2_HOST` | `13.234.x.x` | Deployment target |
-| `EC2_USER` | `ubuntu` | SSH user |
 | `EC2_SSH_KEY` | *(full private key)* | SSH authentication — the entire PEM, including header and footer lines |
-| `POSTGRES_USER` | `fintrack` | Database credentials |
+| `POSTGRES_USER` | `fintrack_app` | Database credentials |
 | `POSTGRES_PASSWORD` | *(strong password)* | Database credentials |
-| `POSTGRES_DB` | `fintrack` | Database name |
+| `POSTGRES_DB` | `fintrack_prod` | Database name |
 | `JWT_SECRET` | `openssl rand -hex 32` | Token signing |
 
-Plus one repository **variable**, `APP_HOST` (the Elastic IP), used for the
-link on the *production* environment. All of the AWS side — ECR, IAM roles,
+Plus two repository **variables** (Variables tab): `EC2_HOST` = the Elastic IP
+and `EC2_USER` = `ubuntu`. Neither is sensitive; as a secret it would be masked as `***` in every log
+line and could not be used for the *production* environment link. All of the AWS side — ECR, IAM roles,
 security group, instance, Elastic IP — is created by
 `scripts/aws-provision.sh`; see [`docs/deployment.md`](docs/deployment.md).
 

@@ -238,13 +238,15 @@ cat <<EOF
 
  GitHub Secrets (Settings -> Secrets and variables -> Actions):
    AWS_ROLE_ARN       ${CI_ROLE_ARN}
+   EC2_SSH_KEY        contents of ${KEY_FILE}
+   POSTGRES_USER      fintrack_app
+   POSTGRES_PASSWORD  <generate: openssl rand -hex 16>
+   POSTGRES_DB        fintrack_prod
+   JWT_SECRET         <generate: openssl rand -hex 32>
+
+ GitHub Variables (same page, Variables tab):
    EC2_HOST           ${PUBLIC_IP}
    EC2_USER           ubuntu
-   EC2_SSH_KEY        contents of ${KEY_FILE}
-   POSTGRES_USER      fintrack
-   POSTGRES_PASSWORD  <generate: openssl rand -hex 16>
-   POSTGRES_DB        fintrack
-   JWT_SECRET         <generate: openssl rand -hex 32>
 
  Next: bootstrap the instance
    scp -i ${KEY_FILE} scripts/ec2-setup.sh ubuntu@${PUBLIC_IP}:~
