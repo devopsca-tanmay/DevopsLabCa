@@ -16,7 +16,10 @@
 set -euo pipefail
 
 DEPLOY_DIR=/opt/fintrack
-TARGET_USER="${SUDO_USER:-$USER}"
+# `ssh host 'bash script'` is a non-interactive, non-login shell where $USER is
+# not guaranteed to be set. With `set -u` an unset $USER would abort the script,
+# so fall back to `id -un`, which always works.
+TARGET_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 
 echo "==> Updating package index"
 sudo apt-get update -y

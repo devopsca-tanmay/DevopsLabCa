@@ -249,6 +249,10 @@ jobs:
           target: final
           push: false
           load: true
+          # Attestation manifests cannot be exported to the local docker image
+          # store, so `load: true` needs them off. The pushed images below keep
+          # the default behaviour.
+          provenance: false
           tags: fintrack-backend:${{ steps.meta.outputs.sha-tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -261,6 +265,7 @@ jobs:
           target: serve
           push: false
           load: true
+          provenance: false
           build-args: |
             VITE_API_URL=/api
           tags: fintrack-frontend:${{ steps.meta.outputs.sha-tag }}
