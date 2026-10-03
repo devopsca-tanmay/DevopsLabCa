@@ -270,6 +270,22 @@ docker compose ps                  # all four services should read "healthy"
 curl http://localhost/health       # {"status":"healthy",...}
 ```
 
+### Seeding demo data
+
+An empty account shows empty states, which is not what you want in a
+screenshot. This populates a demo account through the REST API (not by writing
+to the database directly, so it exercises the same path a real user does):
+
+```bash
+node scripts/seed-demo-data.js                  # against http://localhost
+node scripts/seed-demo-data.js http://<EC2-IP>  # against a deployment
+```
+
+It creates `demo@fintrack.local` / `demo-password-123` with two months of
+history — income ₹120,000, expenses ₹35,000, balance ₹85,000, a ~71% savings
+rate — and budgets that deliberately span all three states (on track, close to
+limit, over budget) so every part of the dashboard renders.
+
 Tear down:
 
 ```bash

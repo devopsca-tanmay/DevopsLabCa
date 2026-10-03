@@ -11,7 +11,14 @@
   },
   "extends": "eslint:recommended",
   "rules": {
-    "no-unused-vars": ["error", { "argsIgnorePattern": "^_|^next$" }],
+    "no-unused-vars": [
+      "error",
+      {
+        "argsIgnorePattern": "^_|^next$",
+        "varsIgnorePattern": "^_",
+        "ignoreRestSiblings": true
+      }
+    ],
     "no-console": "off",
     "eqeqeq": ["error", "smart"],
     "prefer-const": "error",
