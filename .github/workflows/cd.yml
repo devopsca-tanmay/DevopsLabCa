@@ -85,7 +85,7 @@ jobs:
       # address to hand to the instance. Logging in here also proves the role
       # and the repositories exist before anything on the server is touched.
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v5
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
