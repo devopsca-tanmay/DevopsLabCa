@@ -177,7 +177,6 @@ repository secret**.
 | Secret | Value | How to produce it |
 |---|---|---|
 | `AWS_ROLE_ARN` | `arn:aws:iam::<account>:role/fintrack-github-actions` | Printed by `aws-provision.sh` |
-| `EC2_USER` | `ubuntu` | Default for Ubuntu AMIs |
 | `EC2_SSH_KEY` | The **entire** `.pem` contents | `cat fintrack-key.pem` — include the `-----BEGIN/END-----` lines |
 | `POSTGRES_USER` | `fintrack_app` | Anything except a word that appears in logs (see below) |
 | `POSTGRES_PASSWORD` | A strong password | `openssl rand -base64 24` |
@@ -190,8 +189,8 @@ openssl rand -hex 32        # JWT_SECRET
 openssl rand -base64 24     # POSTGRES_PASSWORD
 ```
 
-Also add one **repository variable** (Variables tab, not Secrets):
-`EC2_HOST` = the Elastic IP. The address is public anyway, and as a secret it
+Also add two **repository variables** (Variables tab, not Secrets):
+`EC2_HOST` = the Elastic IP and `EC2_USER` = `ubuntu`. The address is public anyway, and as a secret it
 would be masked as `***` in every log line; GitHub also does not allow secrets
 in a job's `environment.url`.
 
@@ -639,7 +638,6 @@ Every secret the pipeline needs, where it is used, and how to generate it.
 | Secret | Used in | Purpose | Source |
 |---|---|---|---|
 | `AWS_ROLE_ARN` | `ci.yml`, `cd.yml` | Role assumed through OIDC for ECR | `aws-provision.sh` output |
-| `EC2_USER` | `cd.yml` | SSH user | `ubuntu` |
 | `EC2_SSH_KEY` | `cd.yml` | SSH authentication | The full `.pem` file contents |
 | `POSTGRES_USER` | `cd.yml` → `.env` | Database user | Your choice |
 | `POSTGRES_PASSWORD` | `cd.yml` → `.env` | Database password | `openssl rand -base64 24` |
@@ -649,6 +647,7 @@ Every secret the pipeline needs, where it is used, and how to generate it.
 | Variable | Used in | Purpose |
 |---|---|---|
 | `EC2_HOST` | `cd.yml` | Deployment target and the *production* environment link |
+| `EC2_USER` | `cd.yml` | SSH user (`ubuntu` on Ubuntu AMIs) |
 
 There are **no AWS access keys** in this list: CI/CD authenticates through
 OIDC and the instance through its instance profile.
