@@ -335,7 +335,7 @@ jobs:
       # never exposed to untrusted code.
       - name: Configure AWS credentials
         if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
-        uses: aws-actions/configure-aws-credentials@v5
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           # IAM role trusted only for this repository's main/develop pushes.
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
