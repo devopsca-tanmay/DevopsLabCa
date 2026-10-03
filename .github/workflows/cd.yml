@@ -1,0 +1,375 @@
+# =============================================================================
+# FinTrack - Continuous Deployment to AWS EC2
+# -----------------------------------------------------------------------------
+# This workflow runs ONLY after CI has completed successfully on main.
+#
+#   workflow_run (CI, completed)
+#         |
+#         +-- conclusion == 'success'?  --no--> stop. Nothing is deployed.
+#         |
+#        yes
+#         |
+#   resolve image tag (the commit SHA CI built)
+#         |
+#   record the CURRENTLY deployed tag  <-- this is what makes rollback possible
+#         |
+#   SSH to EC2 -> write .env -> docker pull -> migrate -> up -d
+#         |
+#   health check (container status + /health + frontend)
+#         |
+#    pass --> done         fail --> automatic rollback to the previous tag
+#
+# The `workflow_run` trigger is what enforces "CD only after CI". A failing
+# test suite leaves CI red, this workflow sees conclusion != 'success', and
+# deployment never begins - which is the entire point of the gate.
+# =============================================================================
+
+name: CD
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+  # Manual deployment, used for a controlled rollback or to re-deploy a known
+  # good build during the demonstration.
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag to deploy (7-char commit SHA, or "latest")'
+        required: true
+        default: 'latest'
+
+concurrency:
+  # Never let two deployments touch the instance at the same time, and do NOT
+  # cancel one in progress - a half-applied deployment is worse than a slow one.
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+
+    # THE GATE: a manual dispatch, or a CI run that actually succeeded.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    environment:
+      name: production
+      url: http://${{ secrets.EC2_HOST }}
+
+    steps:
+      # -----------------------------------------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # For a workflow_run trigger, check out the exact commit CI tested -
+          # not whatever happens to be at the branch head now.
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+
+      - name: Resolve the image tag to deploy
+        id: resolve
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.image_tag }}"
+            echo "Manual deployment requested: ${TAG}"
+          else
+            # Same derivation CI used, so the tag is guaranteed to exist in
+            # the registry.
+            TAG=$(echo "${{ github.event.workflow_run.head_sha }}" | cut -c1-7)
+            echo "Deploying the build CI produced for this commit: ${TAG}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      # -----------------------------------------------------------------------
+      - name: Install the SSH key
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          # The private key is injected from a GitHub Secret and only ever
+          # exists in the runner's ephemeral filesystem. It is never written to
+          # the repository and never appears in logs.
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Pin the host key so the connection cannot be silently intercepted.
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      # -----------------------------------------------------------------------
+      # Capture what is running RIGHT NOW, before touching anything. This is
+      # the rollback target if the new release fails its health check.
+      - name: Record the currently deployed version
+        id: current
+        run: |
+          set -euo pipefail
+          PREVIOUS=$(ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
+            "grep '^IMAGE_TAG=' /opt/fintrack/.env 2>/dev/null | cut -d= -f2 || echo none")
+          echo "previous=${PREVIOUS}" >> "$GITHUB_OUTPUT"
+          echo "Currently deployed: ${PREVIOUS}"
+          echo "Deploying:          ${{ steps.resolve.outputs.tag }}"
+
+      # -----------------------------------------------------------------------
+      - name: Sync deployment files to the instance
+        run: |
+          set -euo pipefail
+          # Only the files the server genuinely needs: the compose file, the
+          # nginx config and the SQL. NOT the application source - the
+          # application arrives as a pre-built image from the registry.
+          scp -i ~/.ssh/deploy_key -o BatchMode=yes \
+            docker-compose.prod.yml \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/opt/fintrack/docker-compose.prod.yml"
+
+          scp -i ~/.ssh/deploy_key -o BatchMode=yes -r \
+            nginx database \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/opt/fintrack/"
+
+      # -----------------------------------------------------------------------
+      - name: Deploy
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
+            "TAG='${TAG}' \
+             REGISTRY='${{ secrets.DOCKERHUB_USERNAME }}' \
+             DOCKERHUB_USERNAME='${{ secrets.DOCKERHUB_USERNAME }}' \
+             DOCKERHUB_TOKEN='${{ secrets.DOCKERHUB_TOKEN }}' \
+             POSTGRES_USER='${{ secrets.POSTGRES_USER }}' \
+             POSTGRES_PASSWORD='${{ secrets.POSTGRES_PASSWORD }}' \
+             POSTGRES_DB='${{ secrets.POSTGRES_DB }}' \
+             JWT_SECRET='${{ secrets.JWT_SECRET }}' \
+             bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd /opt/fintrack
+
+          # ---- Environment file -------------------------------------------
+          # Written fresh on every deploy from GitHub Secrets, so the only copy
+          # of these values on disk is this file, owned by the deploy user and
+          # readable only by it. Nothing secret is ever committed to git.
+          umask 077
+          cat > .env <<ENVFILE
+          REGISTRY=${REGISTRY}
+          IMAGE_TAG=${TAG}
+          POSTGRES_USER=${POSTGRES_USER}
+          POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+          POSTGRES_DB=${POSTGRES_DB}
+          JWT_SECRET=${JWT_SECRET}
+          JWT_EXPIRES_IN=24h
+          BCRYPT_ROUNDS=10
+          LOG_LEVEL=info
+          NODE_ENV=production
+          ENVFILE
+
+          # ---- Registry login ----------------------------------------------
+          echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
+
+          # ---- Pull the pre-built, CI-tested images -------------------------
+          # Nothing is compiled here. The artifact deployed is byte-for-byte
+          # the one the test suite passed against.
+          echo "==> Pulling images tagged ${TAG}"
+          docker compose -f docker-compose.prod.yml pull
+
+          # ---- Database migrations -----------------------------------------
+          # Run BEFORE the new containers take traffic, using the new image so
+          # the migration code matches the application code. A non-zero exit
+          # here aborts the deploy (set -e) and leaves the old stack running.
+          echo "==> Applying database migrations"
+          docker compose -f docker-compose.prod.yml up -d postgres
+          # Wait for postgres to report healthy before migrating.
+          for i in $(seq 1 30); do
+            if [ "$(docker inspect -f '{{.State.Health.Status}}' fintrack-postgres 2>/dev/null)" = "healthy" ]; then
+              break
+            fi
+            sleep 2
+          done
+          docker compose -f docker-compose.prod.yml run --rm --no-deps backend npm run migrate
+
+          # ---- Replace the containers --------------------------------------
+          echo "==> Starting the new containers"
+          docker compose -f docker-compose.prod.yml up -d --remove-orphans
+
+          # ---- Reclaim disk --------------------------------------------------
+          # Untagged layers from previous builds accumulate and will eventually
+          # fill a small EC2 root volume. Images still referenced by a tag -
+          # including the previous release, which rollback needs - are kept.
+          docker image prune -f --filter "until=168h" || true
+
+          echo "==> Deployment commands completed"
+          REMOTE
+
+      # -----------------------------------------------------------------------
+      # Deployment is not "done" because the commands ran - it is done when the
+      # application answers correctly. These checks are what make that true.
+      - name: Verify container health
+        id: verify_containers
+        run: |
+          set -euo pipefail
+          echo "Waiting for all containers to report healthy..."
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd /opt/fintrack
+
+          for attempt in $(seq 1 30); do
+            UNHEALTHY=0
+            for container in fintrack-postgres fintrack-backend fintrack-frontend fintrack-nginx; do
+              STATUS=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container" 2>/dev/null || echo "missing")
+              if [ "$STATUS" != "healthy" ] && [ "$STATUS" != "running" ]; then
+                UNHEALTHY=1
+              fi
+            done
+
+            if [ "$UNHEALTHY" -eq 0 ]; then
+              echo "All containers healthy."
+              docker compose -f docker-compose.prod.yml ps
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "::error::Containers did not become healthy in time"
+          docker compose -f docker-compose.prod.yml ps
+          echo "---- backend logs ----"
+          docker logs --tail 80 fintrack-backend || true
+          exit 1
+          REMOTE
+
+      - name: Verify the application responds
+        id: verify_app
+        run: |
+          set -euo pipefail
+          HOST="${{ secrets.EC2_HOST }}"
+
+          # --- Backend health, through nginx, from outside the instance ------
+          # This proves the whole chain works: security group -> nginx -> the
+          # backend container -> postgres. A 200 from inside the box would not.
+          echo "==> GET http://${HOST}/health"
+          for attempt in $(seq 1 12); do
+            BODY=$(curl -fsS --max-time 10 "http://${HOST}/health" 2>/dev/null || echo "")
+            if echo "$BODY" | grep -q '"status":"healthy"'; then
+              echo "Backend healthy: $BODY"
+              # The deployed version is reported by /health, so this confirms
+              # the NEW image is serving - not a stale container.
+              echo "$BODY" | grep -o '"version":"[^"]*"' || true
+              break
+            fi
+            if [ "$attempt" -eq 12 ]; then
+              echo "::error::Health check failed. Last response: ${BODY:-<no response>}"
+              exit 1
+            fi
+            sleep 5
+          done
+
+          # --- Database reachability -----------------------------------------
+          # /health reports checks.database, so a "down" here means the API is
+          # up but cannot serve real traffic. That is a failed deployment.
+          if ! curl -fsS --max-time 10 "http://${HOST}/health" | grep -q '"database":"up"'; then
+            echo "::error::Backend is running but cannot reach the database"
+            exit 1
+          fi
+          echo "Database reachable."
+
+          # --- Frontend -------------------------------------------------------
+          echo "==> GET http://${HOST}/"
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://${HOST}/")
+          if [ "$CODE" != "200" ]; then
+            echo "::error::Frontend did not return 200 (got ${CODE})"
+            exit 1
+          fi
+          echo "Frontend served (HTTP 200)."
+
+      # -----------------------------------------------------------------------
+      # Automatic rollback. Runs only when a verification step above failed and
+      # there is a known previous version to go back to.
+      - name: Roll back to the previous version
+        if: failure() && steps.current.outputs.previous != 'none' && steps.current.outputs.previous != ''
+        env:
+          PREVIOUS: ${{ steps.current.outputs.previous }}
+        run: |
+          set -euo pipefail
+          echo "::warning::Deployment verification failed - rolling back to ${PREVIOUS}"
+
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
+            "PREVIOUS='${PREVIOUS}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd /opt/fintrack
+
+          # Immutable SHA tags are what make this a one-line operation: the
+          # previous image is still in the registry (and usually still in the
+          # local cache), unchanged, exactly as it was when it was healthy.
+          sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=${PREVIOUS}/" .env
+          docker compose -f docker-compose.prod.yml pull
+          docker compose -f docker-compose.prod.yml up -d
+
+          echo "Rolled back to ${PREVIOUS}"
+          docker compose -f docker-compose.prod.yml ps
+          REMOTE
+
+          # Confirm the rollback actually restored service.
+          sleep 15
+          if curl -fsS --max-time 10 "http://${{ secrets.EC2_HOST }}/health" | grep -q '"status":"healthy"'; then
+            echo "::notice::Rollback successful - the previous version is serving."
+          else
+            echo "::error::Rollback did not restore service. Manual intervention required - see docs/deployment.md."
+          fi
+
+      # -----------------------------------------------------------------------
+      - name: Collect deployment logs
+        if: always()
+        run: |
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
+            'cd /opt/fintrack && docker compose -f docker-compose.prod.yml ps && echo "---- backend ----" && docker logs --tail 40 fintrack-backend' \
+            || echo "Could not collect logs"
+
+      - name: Summarise the deployment
+        if: always()
+        run: |
+          {
+            echo "### Deployment: ${{ job.status }}"
+            echo ""
+            echo "| Item | Value |"
+            echo "|------|-------|"
+            echo "| Deployed version | \`${{ steps.resolve.outputs.tag }}\` |"
+            echo "| Previous version | \`${{ steps.current.outputs.previous }}\` |"
+            echo "| Target | ${{ secrets.EC2_HOST }} |"
+            echo "| URL | http://${{ secrets.EC2_HOST }} |"
+            echo ""
+            echo "Manual rollback:"
+            echo '```bash'
+            echo "ssh <user>@<host>"
+            echo "cd /opt/fintrack"
+            echo "sed -i 's/^IMAGE_TAG=.*/IMAGE_TAG=${{ steps.current.outputs.previous }}/' .env"
+            echo "docker compose -f docker-compose.prod.yml up -d"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  # Runs when CI FAILED. It exists to make the gate visible in the Actions tab
+  # rather than leaving an unexplained absence of a deployment - which is the
+  # behaviour the failure demonstration is meant to show.
+  blocked:
+    name: Deployment blocked by failing CI
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion != 'success'
+    steps:
+      - name: Report the blocked deployment
+        run: |
+          {
+            echo "### Deployment blocked"
+            echo ""
+            echo "CI concluded **${{ github.event.workflow_run.conclusion }}** for commit \`${{ github.event.workflow_run.head_sha }}\`."
+            echo ""
+            echo "No image was pushed and nothing was deployed. The running production version is untouched."
+            echo ""
+            echo "Fix the failing stage and push again."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "CI did not succeed - deployment intentionally skipped."

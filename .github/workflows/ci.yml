@@ -1,0 +1,377 @@
+# =============================================================================
+# FinTrack - Continuous Integration
+# -----------------------------------------------------------------------------
+# This is the quality gate. Nothing reaches a registry or a server unless every
+# job here is green.
+#
+#   push / pull_request
+#         |
+#         +--> lint ------------+
+#         +--> unit-tests ------+---> build-images ---> trivy scan ---> push
+#         +--> integration-tests|           (push only, on main/develop)
+#         +--> build-frontend --+
+#
+# lint, unit tests, integration tests and the frontend build run in PARALLEL -
+# they are independent, so a lint error surfaces in ~30s rather than after the
+# whole chain. `needs:` then makes the image build wait for ALL of them, so a
+# single failure stops the pipeline before anything is published.
+#
+# Images are pushed only on a push to main/develop - never on a pull request
+# from a fork, which must not have registry credentials.
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop, 'feature/**', 'devops/**']
+  pull_request:
+    branches: [main, develop]
+  # Lets the pipeline be demonstrated on demand from the Actions tab.
+  workflow_dispatch:
+
+# A new push to the same branch cancels the previous run - no point burning
+# runner minutes on a commit that has already been superseded.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # ===========================================================================
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          # Caches ~/.npm keyed on the lockfiles, cutting install time on
+          # repeat runs.
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Lint backend
+        working-directory: backend
+        run: npm run lint
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint
+
+  # ===========================================================================
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+
+      # No database needed: the unit suite only exercises pure functions
+      # (finance calculations and validators), which is exactly why it is a
+      # separate, fast job.
+      - name: Run unit tests
+        working-directory: backend
+        run: npm run test:unit
+
+  # ===========================================================================
+  integration-tests:
+    name: Integration tests
+    runs-on: ubuntu-latest
+
+    # A real PostgreSQL for the duration of the job. The integration suite
+    # talks to it through the actual models - nothing is mocked, so the tests
+    # prove the SQL, the constraints and the foreign keys genuinely work.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fintrack
+          POSTGRES_PASSWORD: fintrack
+          POSTGRES_DB: fintrack_test
+        ports:
+          - 5432:5432
+        # The job will not start until postgres reports healthy, so the suite
+        # never races the database's first boot.
+        options: >-
+          --health-cmd "pg_isready -U fintrack -d fintrack_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Run integration tests
+        working-directory: backend
+        env:
+          NODE_ENV: test
+          # Points at the service container above.
+          DATABASE_URL: postgresql://fintrack:fintrack@localhost:5432/fintrack_test
+          # A throwaway value for the test run only. The real secret lives in
+          # GitHub Secrets and is never present in CI.
+          JWT_SECRET: ci_test_secret_not_used_anywhere_else
+          BCRYPT_ROUNDS: '4'
+        run: npm run test:integration
+
+      - name: Generate coverage report
+        working-directory: backend
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://fintrack:fintrack@localhost:5432/fintrack_test
+          JWT_SECRET: ci_test_secret_not_used_anywhere_else
+          BCRYPT_ROUNDS: '4'
+        run: npm run test:coverage
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        # `always()` so coverage is still available when a test failed - that
+        # is precisely when it is most useful for diagnosis.
+        if: always()
+        with:
+          name: backend-coverage
+          path: backend/coverage/
+          retention-days: 7
+
+  # ===========================================================================
+  build-frontend:
+    name: Build frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      # Proves the production bundle actually compiles. A type error or a bad
+      # import fails here rather than inside a Docker build later.
+      - name: Build production bundle
+        working-directory: frontend
+        env:
+          VITE_API_URL: /api
+        run: npm run build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+          retention-days: 7
+
+  # ===========================================================================
+  build-images:
+    name: Build, scan and push images
+    runs-on: ubuntu-latest
+    # THE GATE. All four jobs above must succeed. If any one fails, this job is
+    # skipped, no image is built, nothing is pushed, and CD never runs.
+    needs: [lint, unit-tests, integration-tests, build-frontend]
+
+    permissions:
+      contents: read
+      # Lets the Trivy SARIF report appear in the repository's Security tab.
+      security-events: write
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.sha-tag }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute image tags
+        id: meta
+        run: |
+          # The short commit SHA is the immutable, unique version tag. `latest`
+          # is a moving pointer for convenience; the SHA tag is what makes a
+          # rollback possible, because it always identifies one exact build.
+          SHA_TAG=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          echo "sha-tag=${SHA_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Image version for this commit: ${SHA_TAG}"
+
+      # --- Build (load locally so the scanner can read the image) ------------
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          # Repo root - the backend image needs database/migrations too.
+          context: .
+          file: backend/Dockerfile
+          target: final
+          push: false
+          load: true
+          tags: fintrack-backend:${{ steps.meta.outputs.sha-tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: frontend/Dockerfile
+          target: serve
+          push: false
+          load: true
+          build-args: |
+            VITE_API_URL=/api
+          tags: fintrack-frontend:${{ steps.meta.outputs.sha-tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # --- Security scan ------------------------------------------------------
+      # Trivy inspects the built image's OS packages and application
+      # dependencies against public vulnerability databases. It runs BEFORE the
+      # push, so a known-vulnerable image is caught before it can be deployed.
+      #
+      # exit-code: '0' means findings are REPORTED but do not fail the build.
+      # That is a deliberate choice for an academic project: a new CVE published
+      # in a base image overnight would otherwise block an unrelated deployment,
+      # and the pipeline's behaviour would depend on an external database's
+      # contents rather than on this repository's code. A production team would
+      # set exit-code: '1' here and maintain a reviewed .trivyignore.
+      - name: Scan backend image with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        # Continue even if the vulnerability database is unreachable, so an
+        # outage at the scanner's CDN cannot break an unrelated deployment.
+        continue-on-error: true
+        with:
+          image-ref: fintrack-backend:${{ steps.meta.outputs.sha-tag }}
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '0'
+
+      - name: Scan frontend image with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        continue-on-error: true
+        with:
+          image-ref: fintrack-frontend:${{ steps.meta.outputs.sha-tag }}
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '0'
+
+      - name: Produce SARIF report for the Security tab
+        uses: aquasecurity/trivy-action@0.28.0
+        continue-on-error: true
+        with:
+          image-ref: fintrack-backend:${{ steps.meta.outputs.sha-tag }}
+          format: sarif
+          output: trivy-backend.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Upload SARIF report
+        uses: github/codeql-action/upload-sarif@v3
+        continue-on-error: true
+        if: always()
+        with:
+          sarif_file: trivy-backend.sarif
+          category: trivy-backend
+
+      # --- Push ---------------------------------------------------------------
+      # Only on a direct push to main or develop. Pull requests - including
+      # those from forks - never reach this step, so registry credentials are
+      # never exposed to untrusted code.
+      - name: Log in to Docker Hub
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push backend image
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          target: final
+          push: true
+          # Both tags point at the same image: the SHA tag is the immutable
+          # record used for rollback, `latest` is the convenience pointer.
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/fintrack-backend:${{ steps.meta.outputs.sha-tag }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/fintrack-backend:latest
+          cache-from: type=gha
+
+      - name: Push frontend image
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: frontend/Dockerfile
+          target: serve
+          push: true
+          build-args: |
+            VITE_API_URL=/api
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/fintrack-frontend:${{ steps.meta.outputs.sha-tag }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/fintrack-frontend:latest
+          cache-from: type=gha
+
+      - name: Summarise the run
+        run: |
+          {
+            echo "### CI passed"
+            echo ""
+            echo "| Item | Value |"
+            echo "|------|-------|"
+            echo "| Commit | \`${GITHUB_SHA}\` |"
+            echo "| Image version | \`${{ steps.meta.outputs.sha-tag }}\` |"
+            echo "| Branch | \`${GITHUB_REF_NAME}\` |"
+            echo ""
+            echo "Rollback to this build with:"
+            echo '```bash'
+            echo "IMAGE_TAG=${{ steps.meta.outputs.sha-tag }} docker compose -f docker-compose.prod.yml up -d"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
