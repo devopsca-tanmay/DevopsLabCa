@@ -14,7 +14,7 @@ root `README.md`.
 | 7 | `07-docker-images.png` | `docker images` | Terminal |
 | 8 | `08-docker-ps.png` | `docker compose ps` with all four healthy | Terminal |
 | 9 | `09-compose-up.png` | `docker compose up -d` output | Terminal |
-| 10 | `10-registry-tags.png` | Both `latest` and the SHA tag | Docker Hub |
+| 10 | `10-registry-tags.png` | Both `latest` and the SHA tag | AWS Console → ECR |
 | 11 | `11-ec2-instance.png` | The running instance | AWS Console |
 | 12 | `12-security-group.png` | Inbound rules (note: no 5432) | AWS Console |
 | 13 | `13-deployment-log.png` | The CD job log | Actions → CD |

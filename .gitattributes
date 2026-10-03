@@ -1,0 +1,9 @@
+# Keep LF line endings in the repository and in every working copy, Windows
+# included. Shell scripts copied to the EC2 instance break on CRLF
+# ("bash: $'\r': command not found"), and the compose/nginx files are mounted
+# straight into Linux containers.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
