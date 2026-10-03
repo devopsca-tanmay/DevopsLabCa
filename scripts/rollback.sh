@@ -64,6 +64,15 @@ cp "$ENV_FILE" "${ENV_FILE}.before-rollback"
 
 sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=${TARGET}/" "$ENV_FILE"
 
+# ECR login tokens last 12 hours, so refresh it before pulling. The instance
+# profile provides the credentials; nothing is read from disk.
+if [[ "$REGISTRY" == *.dkr.ecr.*.amazonaws.com ]]; then
+  REGION=$(echo "$REGISTRY" | cut -d. -f4)
+  echo "==> Logging in to ${REGISTRY}"
+  aws ecr get-login-password --region "$REGION" \
+    | docker login --username AWS --password-stdin "$REGISTRY" >/dev/null
+fi
+
 echo "==> Pulling ${TARGET} (no-op if it is already cached locally)"
 if ! docker compose -f "$COMPOSE_FILE" pull; then
   echo "ERROR: could not pull ${TARGET}. Restoring ${CURRENT}." >&2
