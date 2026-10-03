@@ -789,9 +789,14 @@ Capture these into `docs/screenshots/` for the report:
 
 ## Contributors
 
+L.Y. B.Tech Computer Engineering, K. J. Somaiya College of Engineering —
+DevOps (216U01E744) Lab CA mini project, 2026–27.
+
 | Name | Role |
 |---|---|
-| *(your name)* | Development, DevOps pipeline, documentation |
+| Tanmay Goraksha (16010123136) | Application development, CI/CD workflows |
+| Vivin Dube (16010123276) | Testing, Docker images and compose setup |
+| Shreyash Thakur (16010123326) | AWS deployment (ECR, EC2, IAM), pipeline fixes, documentation |
 
 ---
 
