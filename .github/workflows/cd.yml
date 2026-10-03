@@ -212,7 +212,11 @@ jobs:
             fi
             sleep 2
           done
-          docker compose -f docker-compose.prod.yml run --rm --no-deps backend npm run migrate
+          # This whole script reaches the instance on ssh's stdin (`bash -s`).
+          # `compose run` would read the rest of it as the container's input,
+          # bash would then hit EOF and exit 0 with nothing started - so give
+          # the migration no TTY and an empty stdin.
+          docker compose -f docker-compose.prod.yml run --rm --no-deps -T backend npm run migrate </dev/null
 
           # ---- Replace the containers --------------------------------------
           echo "==> Starting the new containers"
