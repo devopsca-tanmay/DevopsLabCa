@@ -51,6 +51,22 @@ else
   echo "==> Docker already installed: $(docker --version)"
 fi
 
+# --- AWS CLI v2 -----------------------------------------------------------------
+# Images live in Amazon ECR. The instance logs in with
+#   aws ecr get-login-password | docker login ...
+# using its IAM instance profile, so the CLI is needed but no keys are stored.
+if ! command -v aws >/dev/null 2>&1; then
+  echo "==> Installing AWS CLI v2"
+  sudo apt-get install -y unzip
+  ARCH=$(uname -m)
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${ARCH}.zip" -o /tmp/awscliv2.zip
+  unzip -q -o /tmp/awscliv2.zip -d /tmp
+  sudo /tmp/aws/install --update
+  rm -rf /tmp/aws /tmp/awscliv2.zip
+else
+  echo "==> AWS CLI already installed: $(aws --version)"
+fi
+
 echo "==> Enabling Docker to start on boot"
 sudo systemctl enable --now docker
 
@@ -110,6 +126,7 @@ echo ""
 echo " Next steps:"
 echo "   1. Log out and back in so the docker group applies."
 echo "   2. Confirm the security group allows inbound 22 (your IP) and 80 (0.0.0.0/0)."
-echo "   3. Add the GitHub Secrets listed in docs/deployment.md."
-echo "   4. Push to main - the CD pipeline does the rest."
+echo "   3. Attach an instance profile with AmazonEC2ContainerRegistryReadOnly."
+echo "   4. Add the GitHub Secrets listed in docs/deployment.md."
+echo "   5. Push to main - the CD pipeline does the rest."
 echo "============================================================"
