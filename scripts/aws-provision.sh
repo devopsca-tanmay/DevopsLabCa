@@ -81,6 +81,15 @@ fi
 # --- CI/CD role -----------------------------------------------------------------
 # Trusted only for this repository's main and develop pushes, and for the
 # `production` environment the CD job runs in. Pull requests cannot assume it.
+#
+# Repositories with GitHub's immutable OIDC subjects send
+#   repo:<owner>@<owner-id>/<repo>@<repo-id>:ref:refs/heads/main
+# instead of repo:<owner>/<repo>:..., so ask GitHub for the prefix in use and
+# trust both forms.
+SUB_PREFIX="repo:${GITHUB_REPO}"
+GH_PREFIX=$(gh api "repos/${GITHUB_REPO}/actions/oidc/customization/sub" \
+  --jq '.sub_claim_prefix // empty' 2>/dev/null | tr -d '\r' || true)
+ALT_PREFIX="${GH_PREFIX:-$SUB_PREFIX}"
 CI_TRUST=$(cat <<JSON
 {
   "Version": "2012-10-17",
@@ -91,9 +100,12 @@ CI_TRUST=$(cat <<JSON
     "Condition": {
       "StringEquals": {"token.actions.githubusercontent.com:aud": "sts.amazonaws.com"},
       "StringLike": {"token.actions.githubusercontent.com:sub": [
-        "repo:${GITHUB_REPO}:ref:refs/heads/main",
-        "repo:${GITHUB_REPO}:ref:refs/heads/develop",
-        "repo:${GITHUB_REPO}:environment:production"
+        "${SUB_PREFIX}:ref:refs/heads/main",
+        "${SUB_PREFIX}:ref:refs/heads/develop",
+        "${SUB_PREFIX}:environment:production",
+        "${ALT_PREFIX}:ref:refs/heads/main",
+        "${ALT_PREFIX}:ref:refs/heads/develop",
+        "${ALT_PREFIX}:environment:production"
       ]}
     }
   }]
