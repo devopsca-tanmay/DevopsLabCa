@@ -4,15 +4,16 @@ End-to-end AWS deployment: provisioning, secrets, the automated pipeline,
 verification, rollback and recovery.
 
 - [What deployment means here](#what-deployment-means-here)
+- [Fast path — provision everything with one script](#fast-path--provision-everything-with-one-script)
 - [Prerequisites](#prerequisites)
 - [Step 1 — Launch the EC2 instance](#step-1--launch-the-ec2-instance)
 - [Step 2 — Configure the security group](#step-2--configure-the-security-group)
 - [Step 3 — Bootstrap the instance](#step-3--bootstrap-the-instance)
-- [Step 4 — Create the Docker Hub repositories](#step-4--create-the-docker-hub-repositories)
+- [Step 4 — Create the ECR repositories and IAM roles](#step-4--create-the-ecr-repositories-and-iam-roles)
 - [Step 5 — Add the GitHub Secrets](#step-5--add-the-github-secrets)
 - [Step 6 — Deploy](#step-6--deploy)
 - [Step 7 — Verify](#step-7--verify)
-- [Using Amazon ECR instead](#using-amazon-ecr-instead)
+- [How ECR authentication works](#how-ecr-authentication-works)
 - [Manual deployment](#manual-deployment)
 - [Rollback runbook](#rollback-runbook)
 - [Database migrations](#database-migrations)
@@ -49,9 +50,36 @@ enforces this.
 ## Prerequisites
 
 - An AWS account
-- A Docker Hub account (free tier is sufficient)
+- AWS CLI v2 configured with an administrator profile (one-time provisioning only)
 - The repository pushed to GitHub
 - An SSH key pair for EC2
+
+---
+
+## Fast path — provision everything with one script
+
+Steps 1, 2 and 4 are automated by `scripts/aws-provision.sh`. It is idempotent
+(every resource is looked up before it is created), so it is safe to re-run:
+
+```bash
+KEY_DIR=../private ./scripts/aws-provision.sh
+```
+
+| Resource | Name | Notes |
+|---|---|---|
+| ECR repositories | `fintrack-backend`, `fintrack-frontend` | Scan on push, keep 20 images |
+| IAM OIDC provider | `token.actions.githubusercontent.com` | Lets GitHub Actions assume a role |
+| IAM role (CI/CD) | `fintrack-github-actions` | ECR push, trusted only for this repo's main/develop/production |
+| IAM role (instance) | `fintrack-ec2` | `AmazonEC2ContainerRegistryReadOnly` |
+| Key pair | `fintrack-deploy` | ed25519, written to `$KEY_DIR` — keep it **outside** the repository |
+| Security group | `fintrack-web` | 80 and 22 inbound, nothing else |
+| EC2 instance | `fintrack-prod` | t3.micro, Ubuntu 24.04, 20 GB gp3, IMDSv2 required |
+| Elastic IP | `fintrack-prod` | Address survives stop/start |
+
+It ends by printing the values for Step 5. Then continue with Step 3.
+
+The manual console steps below are kept as a reference for what the script
+does.
 
 ---
 
@@ -126,16 +154,18 @@ ls -ld /opt/fintrack
 
 ---
 
-## Step 4 — Create the Docker Hub repositories
+## Step 4 — Create the ECR repositories and IAM roles
 
-Docker Hub → **Create repository**, twice:
+Done by `scripts/aws-provision.sh`. By hand it is:
 
-- `fintrack-backend`
-- `fintrack-frontend`
+```bash
+aws ecr create-repository --repository-name fintrack-backend  --image-scanning-configuration scanOnPush=true
+aws ecr create-repository --repository-name fintrack-frontend --image-scanning-configuration scanOnPush=true
+```
 
-Then create an access token: **Account Settings → Security → New Access
-Token**, with Read & Write scope. Use the token — not your account password —
-as `DOCKERHUB_TOKEN`.
+plus the GitHub OIDC provider, the `fintrack-github-actions` role (ECR push)
+and the `fintrack-ec2` instance profile (ECR read-only) attached to the
+instance. See [How ECR authentication works](#how-ecr-authentication-works).
 
 ---
 
@@ -146,8 +176,7 @@ repository secret**.
 
 | Secret | Value | How to produce it |
 |---|---|---|
-| `DOCKERHUB_USERNAME` | Your Docker Hub username | Also the image namespace |
-| `DOCKERHUB_TOKEN` | The access token from Step 4 | Not your password |
+| `AWS_ROLE_ARN` | `arn:aws:iam::<account>:role/fintrack-github-actions` | Printed by `aws-provision.sh` |
 | `EC2_HOST` | `13.234.x.x` | EC2 console → public IPv4 |
 | `EC2_USER` | `ubuntu` | Default for Ubuntu AMIs |
 | `EC2_SSH_KEY` | The **entire** `.pem` contents | `cat fintrack-key.pem` — include the `-----BEGIN/END-----` lines |
@@ -161,6 +190,10 @@ repository secret**.
 openssl rand -hex 32        # JWT_SECRET
 openssl rand -base64 24     # POSTGRES_PASSWORD
 ```
+
+Also add one **repository variable** (Variables tab, not Secrets):
+`APP_HOST` = the Elastic IP. GitHub does not allow secrets in a job's
+`environment.url`, so the link on the *production* environment uses this.
 
 > `EC2_SSH_KEY` must be the complete private key including both delimiter
 > lines. A truncated key is the single most common cause of
@@ -246,48 +279,47 @@ Then open `http://<EC2-IP>` in a browser, register, and add a transaction.
 
 ---
 
-## Using Amazon ECR instead
+## How ECR authentication works
 
 ECR is the AWS-native registry: private by default, IAM-controlled, and in the
-same region as the instance — faster pulls and no cross-internet egress.
+same region as the instance, so pulls are fast and never leave AWS. Neither
+side of the pipeline holds a long-lived AWS key.
 
-```bash
-aws ecr create-repository --repository-name fintrack-backend  --region ap-south-1
-aws ecr create-repository --repository-name fintrack-frontend --region ap-south-1
+```
+ GitHub Actions job                      AWS
+ ------------------                      ---
+ OIDC token (signed by GitHub,   --->   IAM OIDC provider
+ sub = repo:<owner>/<repo>:...)          token.actions.githubusercontent.com
+                                                |
+                                  trust policy  v
+                                  fintrack-github-actions role
+                                  (ECR push on fintrack-* only)
+                                                |
+ temporary credentials (1 h)     <-------------+
+ amazon-ecr-login -> docker push
+
+ EC2 instance
+ ------------
+ instance profile fintrack-ec2   --->   AmazonEC2ContainerRegistryReadOnly
+ aws ecr get-login-password | docker login   (inside the CD SSH session
+                                              and in rollback.sh)
 ```
 
-In `ci.yml`, replace the Docker Hub login step with:
+The CI role's trust policy accepts exactly three subjects, so a pull request
+or a fork can never push an image:
 
-```yaml
-- uses: aws-actions/configure-aws-credentials@v4
-  with:
-    aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-    aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-    aws-region:            ${{ secrets.AWS_REGION }}
-
-- uses: aws-actions/amazon-ecr-login@v2
-  id: ecr
+```
+repo:<owner>/<repo>:ref:refs/heads/main
+repo:<owner>/<repo>:ref:refs/heads/develop
+repo:<owner>/<repo>:environment:production     (the CD job)
 ```
 
-and change the image tags to
-`${{ steps.ecr.outputs.registry }}/fintrack-backend:<tag>`.
+Each repository keeps the 20 most recent images (lifecycle policy) and scans
+every pushed image (`scanOnPush`), in addition to the Trivy scan in CI.
 
-On the instance, the registry login becomes:
-
-```bash
-aws ecr get-login-password --region ap-south-1 \
-  | docker login --username AWS --password-stdin <account>.dkr.ecr.ap-south-1.amazonaws.com
-```
-
-The cleanest approach is to attach an **IAM instance role** with
-`AmazonEC2ContainerRegistryReadOnly` to the EC2 instance, so it can pull
-without any long-lived credentials on disk at all.
-
-Additional secrets: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`,
-`ECR_REGISTRY`.
-
-Everything else — tagging, scanning, the compose files, rollback — is
-unchanged, because they all read `REGISTRY` from the environment.
+Everything else — tagging, the compose files, rollback — reads `REGISTRY`
+from `/opt/fintrack/.env`, which CD sets to
+`<account>.dkr.ecr.ap-south-1.amazonaws.com`.
 
 ---
 
@@ -375,7 +407,7 @@ verified deployment path as a normal release.
 | Source | Command |
 |---|---|
 | Locally cached images | `docker images '*/fintrack-backend'` |
-| Registry | Docker Hub → repository → Tags |
+| Registry | `aws ecr describe-images --repository-name fintrack-backend` or ECR console → Images |
 | Git history | `git log --oneline -10` — the 7-char SHA **is** the tag |
 | Previous CD run | The job summary records both deployed and previous versions |
 
@@ -539,8 +571,9 @@ sudo usermod -aG docker ubuntu
 ### `manifest unknown` / `pull access denied`
 
 The tag does not exist in the registry, or the login failed. Check the CI run
-actually reached its push step, and verify `DOCKERHUB_USERNAME` matches the
-image namespace exactly.
+actually reached its push step, that the instance still has the `fintrack-ec2`
+instance profile attached, and that the ECR login was refreshed (tokens last
+12 hours — `rollback.sh` does this automatically).
 
 ### Health check fails but the containers are running
 
@@ -600,8 +633,7 @@ Every secret the pipeline needs, where it is used, and how to generate it.
 
 | Secret | Used in | Purpose | Source |
 |---|---|---|---|
-| `DOCKERHUB_USERNAME` | `ci.yml`, `cd.yml` | Registry login, image namespace | Your Docker Hub username |
-| `DOCKERHUB_TOKEN` | `ci.yml`, `cd.yml` | Registry authentication | Docker Hub → Security → New Access Token |
+| `AWS_ROLE_ARN` | `ci.yml`, `cd.yml` | Role assumed through OIDC for ECR | `aws-provision.sh` output |
 | `EC2_HOST` | `cd.yml` | Deployment target | EC2 console → public IPv4 |
 | `EC2_USER` | `cd.yml` | SSH user | `ubuntu` |
 | `EC2_SSH_KEY` | `cd.yml` | SSH authentication | The full `.pem` file contents |
@@ -609,10 +641,13 @@ Every secret the pipeline needs, where it is used, and how to generate it.
 | `POSTGRES_PASSWORD` | `cd.yml` → `.env` | Database password | `openssl rand -base64 24` |
 | `POSTGRES_DB` | `cd.yml` → `.env` | Database name | `fintrack` |
 | `JWT_SECRET` | `cd.yml` → `.env` | Token signing | `openssl rand -hex 32` |
-| `AWS_ACCESS_KEY_ID` | `ci.yml` *(ECR only)* | ECR authentication | IAM user |
-| `AWS_SECRET_ACCESS_KEY` | `ci.yml` *(ECR only)* | ECR authentication | IAM user |
-| `AWS_REGION` | `ci.yml` *(ECR only)* | ECR region | e.g. `ap-south-1` |
-| `ECR_REGISTRY` | `ci.yml` *(ECR only)* | Registry host | `<account>.dkr.ecr.<region>.amazonaws.com` |
+
+| Variable | Used in | Purpose |
+|---|---|---|
+| `APP_HOST` | `cd.yml` | Public address shown on the *production* environment |
+
+There are **no AWS access keys** in this list: CI/CD authenticates through
+OIDC and the instance through its instance profile.
 
 **None of these values appears anywhere in this repository**, in any branch or
 commit. They exist only in GitHub Secrets and, at runtime, in
