@@ -130,7 +130,7 @@ jobs:
         run: |
           set -euo pipefail
           PREVIOUS=$(ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
-            "${{ secrets.EC2_USER }}@${{ vars.EC2_HOST }}" \
+            "${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}" \
             "grep '^IMAGE_TAG=' /opt/fintrack/.env 2>/dev/null | cut -d= -f2 || echo none")
           echo "previous=${PREVIOUS}" >> "$GITHUB_OUTPUT"
           echo "Currently deployed: ${PREVIOUS}"
@@ -145,11 +145,11 @@ jobs:
           # application arrives as a pre-built image from the registry.
           scp -i ~/.ssh/deploy_key -o BatchMode=yes \
             docker-compose.prod.yml \
-            "${{ secrets.EC2_USER }}@${{ vars.EC2_HOST }}:/opt/fintrack/docker-compose.prod.yml"
+            "${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}:/opt/fintrack/docker-compose.prod.yml"
 
           scp -i ~/.ssh/deploy_key -o BatchMode=yes -r \
             nginx database \
-            "${{ secrets.EC2_USER }}@${{ vars.EC2_HOST }}:/opt/fintrack/"
+            "${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}:/opt/fintrack/"
 
       # -----------------------------------------------------------------------
       - name: Deploy
@@ -158,7 +158,7 @@ jobs:
         run: |
           set -euo pipefail
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
-            "${{ secrets.EC2_USER }}@${{ vars.EC2_HOST }}" \
+            "${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}" \
             "TAG='${TAG}' \
              REGISTRY='${{ steps.ecr.outputs.registry }}' \
              AWS_REGION='${{ env.AWS_REGION }}' \
@@ -241,7 +241,7 @@ jobs:
           set -euo pipefail
           echo "Waiting for all containers to report healthy..."
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
-            "${{ secrets.EC2_USER }}@${{ vars.EC2_HOST }}" 'bash -s' <<'REMOTE'
+            "${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}" 'bash -s' <<'REMOTE'
           set -euo pipefail
           cd /opt/fintrack
 
@@ -325,7 +325,7 @@ jobs:
           echo "::warning::Deployment verification failed - rolling back to ${PREVIOUS}"
 
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
-            "${{ secrets.EC2_USER }}@${{ vars.EC2_HOST }}" \
+            "${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}" \
             "PREVIOUS='${PREVIOUS}' bash -s" <<'REMOTE'
           set -euo pipefail
           cd /opt/fintrack
@@ -354,7 +354,7 @@ jobs:
         if: always()
         run: |
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
-            "${{ secrets.EC2_USER }}@${{ vars.EC2_HOST }}" \
+            "${{ vars.EC2_USER }}@${{ vars.EC2_HOST }}" \
             'cd /opt/fintrack && docker compose -f docker-compose.prod.yml ps && echo "---- backend ----" && docker logs --tail 40 fintrack-backend' \
             || echo "Could not collect logs"
 
