@@ -339,14 +339,16 @@ rollbacks alike. Only `docker compose down -v` destroys it.
 
 ## 4. Registry
 
-Docker Hub is the artifact store. Every CI build on `main`/`develop` pushes two
+Amazon ECR is the artifact store. Every CI build on `main`/`develop` pushes two
 tags pointing at the same image:
 
 ```
-<user>/fintrack-backend:latest      moving pointer — convenience
-<user>/fintrack-backend:a81f23c     immutable — the commit SHA
-<user>/fintrack-frontend:latest
-<user>/fintrack-frontend:a81f23c
+<registry>/fintrack-backend:latest      moving pointer — convenience
+<registry>/fintrack-backend:a81f23c     immutable — the commit SHA
+<registry>/fintrack-frontend:latest
+<registry>/fintrack-frontend:a81f23c
+
+<registry> = <account>.dkr.ecr.ap-south-1.amazonaws.com
 ```
 
 **Why the SHA tag matters.** `latest` means "whatever was built most recently",
@@ -361,32 +363,14 @@ exact build forever, so:
   deploy v2 (b72d91e)  ->  fails  ->  IMAGE_TAG=a81f23c  ->  up -d  ->  restored
 ```
 
-### Using Amazon ECR instead
+### Authentication without stored keys
 
-ECR is the AWS-native choice: private by default, IAM-controlled, and in the
-same region as the instance (faster pulls, no egress cost).
-
-```bash
-aws ecr create-repository --repository-name fintrack-backend  --region ap-south-1
-aws ecr create-repository --repository-name fintrack-frontend --region ap-south-1
-```
-
-In `ci.yml`, replace the Docker Hub login with:
-
-```yaml
-- uses: aws-actions/configure-aws-credentials@v4
-  with:
-    aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-    aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-    aws-region:            ${{ secrets.AWS_REGION }}
-
-- uses: aws-actions/amazon-ecr-login@v2
-  id: ecr
-```
-
-and set `REGISTRY` to `${{ steps.ecr.outputs.registry }}`. Everything else —
-tagging, scanning, the compose files, rollback — is unchanged, because they all
-read `REGISTRY` from the environment.
+CI assumes the `fintrack-github-actions` IAM role with GitHub's OIDC token
+(`aws-actions/configure-aws-credentials` + `aws-actions/amazon-ecr-login`).
+The role's trust policy only accepts this repository's `main` and `develop`
+pushes and the `production` environment, so a pull request cannot push.
+The EC2 instance pulls with its own read-only instance profile. The full flow
+is in [`deployment.md`](deployment.md#how-ecr-authentication-works).
 
 ---
 
@@ -577,8 +561,7 @@ commit, in any history.
 
 | Secret | Purpose | How to obtain |
 |---|---|---|
-| `DOCKERHUB_USERNAME` | Registry login + image namespace | Your Docker Hub username |
-| `DOCKERHUB_TOKEN` | Registry login | Docker Hub → Account Settings → Security → New Access Token |
+| `AWS_ROLE_ARN` | IAM role assumed via OIDC to push to / resolve ECR | Output of `scripts/aws-provision.sh` |
 | `EC2_HOST` | Deployment target | EC2 console → public IPv4 |
 | `EC2_USER` | SSH user | `ubuntu` on Ubuntu AMIs |
 | `EC2_SSH_KEY` | SSH authentication | The **entire** `.pem`, including `-----BEGIN/END-----` lines |
@@ -760,7 +743,7 @@ Or from GitHub: **Actions → CD → Run workflow**, entering the tag.
 |---|---|
 | What is live? | `curl http://<host>/health` → `version` |
 | What was live before? | `/opt/fintrack/.env.before-rollback`, or the CD job summary |
-| What can I roll back to? | `./rollback.sh` with no arguments, or Docker Hub tags |
+| What can I roll back to? | `./rollback.sh` with no arguments, or the ECR image list |
 
 ### The limit, stated plainly
 
@@ -895,7 +878,7 @@ heading is back. Then roll forward again to leave the demo in its final state.
 | Point | Evidence to show |
 |---|---|
 | Tests gate deployment | The failed run with `build-images` skipped |
-| The artifact is immutable | Docker Hub showing both `latest` and the SHA tag |
+| The artifact is immutable | ECR showing both `latest` and the SHA tag |
 | Nothing is built on the server | `docker-compose.prod.yml` has no `build:` key |
 | Deployment is verified, not assumed | The health-check step in the CD log |
 | Rollback is fast and documented | `./rollback.sh` running live |
