@@ -799,5 +799,3 @@ Capture these into `docs/screenshots/` for the report:
 
 Academic demonstration project. Not intended for production use and not a real
 financial service.
-# DevopsLabCa
-# DevopsLabCa
