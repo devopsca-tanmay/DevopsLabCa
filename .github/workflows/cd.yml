@@ -226,6 +226,14 @@ jobs:
           echo "==> Starting the new containers"
           docker compose -f docker-compose.prod.yml up -d --remove-orphans
 
+          # nginx.conf is bind-mounted, so compose cannot see when the file
+          # changes and leaves the running nginx on the old configuration.
+          # Reload it so a synced config change actually takes effect (a broken
+          # config fails here, before traffic is affected, and triggers rollback).
+          echo "==> Reloading nginx configuration"
+          docker exec fintrack-nginx nginx -t
+          docker exec fintrack-nginx nginx -s reload
+
           # ---- Reclaim disk --------------------------------------------------
           # Untagged layers from previous builds accumulate and will eventually
           # fill a small EC2 root volume. Images still referenced by a tag -
